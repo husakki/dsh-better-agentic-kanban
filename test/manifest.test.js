@@ -49,6 +49,16 @@ test("the client bundle and remote descriptors use the package name", () => {
   assert.match(client, new RegExp(`"${pkg.name}#kanban/move"`));
 });
 
+test("the move session field matches between Host and client", () => {
+  const host = readFileSync(join(root, "index.js"), "utf8");
+  const client = readFileSync(join(root, "client.js"), "utf8");
+  // SRC discovery reads the Host method's parameter names; the client descriptor
+  // must send the same wire field or the Gateway rejects the call.
+  assert.match(host, /async move\(id, status, sessionId\)/);
+  assert.match(client, /name:\s*"sessionId"/);
+  assert.match(client, /wire:\s*"sessionId"/);
+});
+
 test("display metadata and bundle patch are present", () => {
   const locale = JSON.parse(readFileSync(join(root, "locale/en.json"), "utf8"));
   assert.ok(locale.meta.title.length > 0);

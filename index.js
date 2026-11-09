@@ -84,17 +84,17 @@ class KanbanService extends TypertRemoteService {
     return todo;
   }
 
-  async move(id, status, requestedSessionId) {
+  async move(id, status, sessionId) {
     if (typeof id !== "string" || id.length === 0) throw new Error("kanban: id is required");
     if (!STATUSES.includes(status)) throw new Error(`kanban: invalid status ${JSON.stringify(status)}`);
-    if (requestedSessionId !== undefined && typeof requestedSessionId !== "string") {
+    if (sessionId !== undefined && typeof sessionId !== "string") {
       throw new Error("kanban: sessionId must be a string when provided");
     }
     // A repeated click or network retry must not start a second run for one task.
     // Concurrent moves of the same task share the first in-flight operation.
     const inFlight = this.moves.get(id);
     if (inFlight !== undefined) return inFlight;
-    const operation = this.applyMove(id, status, requestedSessionId);
+    const operation = this.applyMove(id, status, sessionId);
     this.moves.set(id, operation);
     try {
       return await operation;
@@ -103,7 +103,7 @@ class KanbanService extends TypertRemoteService {
     }
   }
 
-  async applyMove(id, status, requestedSessionId) {
+  async applyMove(id, status, sessionId) {
     const table = await this.table();
     const current = table.get(id);
     if (current === undefined) throw new Error(`kanban: no todo with id ${JSON.stringify(id)}`);
@@ -114,7 +114,7 @@ class KanbanService extends TypertRemoteService {
     // kanban_move must not re-wake itself or another agent.
     if (current.status === "todo" && status === "in_progress" && this.ctx.agents.currentInitiator() === undefined) {
       try {
-        this.wakeForTask(next, requestedSessionId);
+        this.wakeForTask(next, sessionId);
       } catch (error) {
         await table.put(id, current);
         throw error;
@@ -128,14 +128,14 @@ class KanbanService extends TypertRemoteService {
    * The client sends the session it is viewing; otherwise use the most recent
    * root. Never fan one task prompt out to every live root.
    */
-  wakeForTask(todo, requestedSessionId) {
+  wakeForTask(todo, sessionId) {
     const roots = this.ctx.agents.roots();
     if (roots.length === 0) {
       throw new Error("kanban: no live agent session is available to start this task; open a session first");
     }
-    const requested = requestedSessionId === undefined
+    const requested = sessionId === undefined
       ? undefined
-      : roots.find((agent) => agent.id === requestedSessionId);
+      : roots.find((agent) => agent.id === sessionId);
     const target = requested ?? roots[roots.length - 1];
     const message = createUserMessage({
       content: [{
