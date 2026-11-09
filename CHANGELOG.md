@@ -33,3 +33,6 @@ uses [Semantic Versioning](https://semver.org/).
   task prompt out to every live root agent.
 - Concurrent moves of one task share a single in-flight start, so a double click
   or retry cannot launch duplicate runs.
+- Matched the `move` remote field name (`sessionId`) between the Host method
+  signature and the client descriptor, so Start no longer fails with an
+  unexpected-field Gateway error.
