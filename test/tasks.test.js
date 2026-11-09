@@ -1,30 +1,46 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import KanbanService, { migrateTodos } from "../index.js";
+import KanbanService, { migrateDomain } from "../index.js";
 
 /** Build a service instance without the Cordis constructor. */
 function service(ctx = {}) {
   const instance = Object.create(KanbanService.prototype);
   instance.ctx = ctx;
   instance.moves = new Map();
-  instance.numberChain = Promise.resolve();
   return instance;
 }
 
-/** In-memory fake of an opened domain (single `todos` table + counter global). */
-function fakeDomain(rows = []) {
-  const records = new Map(rows.map((row) => [row.id, row]));
-  let global = { nextNumber: 1 };
-  const table = {
-    get: (id) => records.get(id),
+/**
+ * In-memory fake of an opened domain: a `todos` table, a `workspaces` table,
+ * and the counter/active-workspace global.
+ */
+function fakeDomain(rows = [], opts = {}) {
+  const todos = new Map(rows.map((row) => [row.id, row]));
+  const workspaces = new Map(Object.entries(opts.workspaces ?? {}));
+  let global = { activeWorkspace: opts.activeWorkspace ?? "" };
+  if (opts.nextNumber !== undefined) global.nextNumber = opts.nextNumber;
+  const todoTable = {
+    get: (id) => todos.get(id),
     put: async (id, value) => {
-      records.set(id, value);
+      todos.set(id, value);
     },
     delete: async (id) => {
-      records.delete(id);
+      todos.delete(id);
       return true;
     },
-    entries: () => records.entries(),
+    entries: () => todos.entries(),
+  };
+  const workspaceTable = {
+    get: (id) => workspaces.get(id),
+    put: async (id, value) => {
+      workspaces.set(id, value);
+    },
+    update: async (id, fn) => {
+      const next = fn(workspaces.get(id));
+      workspaces.set(id, next);
+      return next;
+    },
+    entries: () => workspaces.entries(),
   };
   return {
     global: {
@@ -33,32 +49,40 @@ function fakeDomain(rows = []) {
         global = value;
       },
     },
-    table: () => table,
+    table: (name) => (name === "workspaces" ? workspaceTable : todoTable),
   };
 }
 
-function bindAdd(instance, domain) {
+function bind(instance, domain) {
   instance.domainPromise = Promise.resolve(domain);
-  instance.table = async () => domain.table("todos");
+  instance.table = async (name = "todos") => domain.table(name);
 }
 
-test("add assigns monotonic numbers and does not reuse them after deletion", async () => {
+test("add assigns monotonic numbers per workspace and does not reuse after deletion", async () => {
   const instance = service();
-  bindAdd(instance, fakeDomain());
+  bind(instance, fakeDomain([], { activeWorkspace: "/ws", workspaces: { "/ws": { path: "/ws", nextNumber: 1, addedAt: 1 } } }));
 
   const a = await instance.add({ title: "First" });
   const b = await instance.add({ title: "Second", description: "details" });
   assert.equal(a.number, 1);
   assert.equal(b.number, 2);
+  assert.equal(a.workspace, "/ws");
 
   await instance.deleteTodo(b.id);
   const c = await instance.add({ title: "Third" });
   assert.equal(c.number, 3);
 });
 
+test("add requires an active workspace", async () => {
+  const instance = service();
+  bind(instance, fakeDomain());
+
+  await assert.rejects(() => instance.add({ title: "No workspace" }), /no workspace is selected/);
+});
+
 test("add enters the Backlog (todo) status and normalizes the description", async () => {
   const instance = service();
-  bindAdd(instance, fakeDomain());
+  bind(instance, fakeDomain([], { activeWorkspace: "/ws", workspaces: { "/ws": { path: "/ws", nextNumber: 1, addedAt: 1 } } }));
 
   const noDescription = await instance.add({ title: "No details" });
   assert.equal(noDescription.status, "todo");
@@ -70,32 +94,32 @@ test("add enters the Backlog (todo) status and normalizes the description", asyn
 
 test("add rejects an empty or missing title", async () => {
   const instance = service();
-  bindAdd(instance, fakeDomain());
+  bind(instance, fakeDomain([], { activeWorkspace: "/ws", workspaces: { "/ws": { path: "/ws", nextNumber: 1, addedAt: 1 } } }));
 
   await assert.rejects(() => instance.add({ title: "" }), /non-empty/);
   await assert.rejects(() => instance.add({ title: "   " }), /non-empty/);
   await assert.rejects(() => instance.add({}), /non-empty/);
 });
 
-test("update persists title and description and never changes the number", async () => {
+test("update persists title and description and never changes number or workspace", async () => {
   const instance = service();
-  bindAdd(instance, fakeDomain());
+  bind(instance, fakeDomain([], { activeWorkspace: "/ws", workspaces: { "/ws": { path: "/ws", nextNumber: 1, addedAt: 1 } } }));
   const todo = await instance.add({ title: "Old", description: "old desc" });
 
   const full = await instance.update(todo.id, { title: "New title", description: "new desc" });
   assert.equal(full.title, "New title");
   assert.equal(full.description, "new desc");
   assert.equal(full.number, todo.number);
+  assert.equal(full.workspace, "/ws");
 
   const partial = await instance.update(todo.id, { description: "only desc" });
   assert.equal(partial.title, "New title");
   assert.equal(partial.description, "only desc");
-  assert.equal(partial.number, todo.number);
 });
 
 test("update rejects a missing id and an empty title", async () => {
   const instance = service();
-  bindAdd(instance, fakeDomain());
+  bind(instance, fakeDomain([], { activeWorkspace: "/ws", workspaces: { "/ws": { path: "/ws", nextNumber: 1, addedAt: 1 } } }));
   const todo = await instance.add({ title: "Keep" });
 
   await assert.rejects(() => instance.update("missing-id", { title: "x" }), /no todo/);
@@ -104,7 +128,16 @@ test("update rejects a missing id and an empty title", async () => {
 
 test("moving a task to failed does not wake a session", async () => {
   const calls = [];
-  let row = { id: "todo-1", number: 1, title: "Fix it", description: "", status: "todo", createdAt: 1, updatedAt: 1 };
+  let row = {
+    id: "todo-1",
+    number: 1,
+    title: "Fix it",
+    description: "",
+    workspace: "/ws",
+    status: "todo",
+    createdAt: 1,
+    updatedAt: 1,
+  };
   const table = {
     get: () => row,
     put: async (_id, value) => {
@@ -123,27 +156,36 @@ test("moving a task to failed does not wake a session", async () => {
   assert.deepEqual(calls, []);
 });
 
-test("migrateTodos backfills version-1 rows in creation order and advances the counter", async () => {
+test("migrateDomain backfills unnumbered v1 rows in creation order and seeds the default workspace", async () => {
   const domain = fakeDomain([
     { id: "a", title: "Later", status: "todo", createdAt: 2, updatedAt: 2 },
     { id: "b", title: "Earlier", status: "done", createdAt: 1, updatedAt: 1 },
   ]);
 
-  await migrateTodos(domain);
+  await migrateDomain(domain);
 
+  const defaultWorkspace = process.cwd();
   assert.equal(domain.table("todos").get("b").number, 1);
   assert.equal(domain.table("todos").get("a").number, 2);
   assert.equal(domain.table("todos").get("b").description, "");
-  assert.equal(domain.global.get().nextNumber, 3);
+  assert.equal(domain.table("todos").get("b").workspace, defaultWorkspace);
+  assert.equal(domain.global.get().activeWorkspace, defaultWorkspace);
+  assert.equal(domain.table("workspaces").get(defaultWorkspace).nextNumber, 3);
 });
 
-test("migrateTodos keeps existing numbers and never reuses them", async () => {
-  const domain = fakeDomain([
-    { id: "a", number: 7, title: "Numbered", description: "x", status: "todo", createdAt: 1, updatedAt: 1 },
-  ]);
+test("migrateDomain keeps existing numbers, assigns workspaces, and never reuses a number", async () => {
+  const domain = fakeDomain(
+    [
+      { id: "c", number: 7, title: "Numbered", description: "x", status: "todo", createdAt: 3, updatedAt: 3 },
+    ],
+    { nextNumber: 10 },
+  );
 
-  await migrateTodos(domain);
+  await migrateDomain(domain);
 
-  assert.equal(domain.table("todos").get("a").number, 7);
-  assert.equal(domain.global.get().nextNumber, 8);
+  const defaultWorkspace = process.cwd();
+  assert.equal(domain.table("todos").get("c").number, 7);
+  assert.equal(domain.table("todos").get("c").workspace, defaultWorkspace);
+  assert.equal(domain.global.get().activeWorkspace, defaultWorkspace);
+  assert.equal(domain.table("workspaces").get(defaultWorkspace).nextNumber, 10);
 });

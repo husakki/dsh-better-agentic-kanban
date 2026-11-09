@@ -1,4 +1,7 @@
+import { stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
+import Schema from "@deepseek-ai/schemastery";
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { z as zod } from "zod";
@@ -13,30 +16,43 @@ const STATUSES = ["todo", "in_progress", "done", "failed"];
 /** Durable todo record, validated on every open and write. */
 const todoSchema = zod.object({
   id: zod.string().min(1),
-  // `number` and `description` are optional here only so version-1 rows (which
-  // predate both fields) still validate; the open-time migration backfills them
-  // and every new write sets both explicitly.
+  // Optional fields admit pre-workspace (v1/v2) rows; the open-time migration
+  // backfills them and every new write sets them explicitly.
   number: zod.number().int().positive().optional(),
   title: zod.string().min(1),
   description: zod.string().optional(),
+  workspace: zod.string().optional(),
   status: zod.enum(STATUSES),
   createdAt: zod.number(),
   updatedAt: zod.number(),
 });
 
+/** One known workspace: its absolute path plus its monotonic number counter. */
+const workspaceSchema = zod.object({
+  path: zod.string().min(1),
+  nextNumber: zod.number().int().min(1),
+  addedAt: zod.number(),
+});
+
 /** The board is a single global KV domain persisted by the JSON storage backend. */
 const kanbanDomain = defineDomain({
   name: "kanban",
-  version: 2,
-  // Version 1 predates task numbers and descriptions; admit those rows and
-  // backfill them in `migrateTodos` rather than bricking an existing board.
-  compatibleVersions: [1],
+  version: 3,
+  // Versions 1 (no numbers/descriptions) and 2 (no workspaces) are admitted and
+  // backfilled in `migrateDomain` rather than bricking an existing board.
+  compatibleVersions: [1, 2],
   tables: {
     todos: domainTable(todoSchema),
+    workspaces: domainTable(workspaceSchema),
   },
   global: {
-    schema: zod.object({ nextNumber: zod.number().int().min(1) }),
-    initial: { nextNumber: 1 },
+    schema: zod.object({
+      // "" means "no workspace selected"; the global slot cannot store null.
+      activeWorkspace: zod.string().optional(),
+      // v2 legacy counter, migrated into the default workspace then dropped.
+      nextNumber: zod.number().int().min(1).optional(),
+    }),
+    initial: { activeWorkspace: "" },
   },
 });
 
@@ -53,27 +69,75 @@ function normalizeDescription(value) {
   return value;
 }
 
-/** Backfill version-1 rows and keep the monotonic number counter honest. */
-async function migrateTodos(domain) {
-  const table = domain.table("todos");
-  let next = domain.global.get().nextNumber;
-  const rows = [...table.entries()].map(([id, value]) => ({ id, value }));
+function normalizeMaxParallel(value) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 10) {
+    throw new Error("kanban: maxParallelTasks must be an integer between 1 and 10");
+  }
+  return value;
+}
+
+/** Resolve and validate a workspace directory path, returning its absolute form. */
+async function assertDirectory(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("kanban: workspace path must be a non-empty string");
+  }
+  const absolute = resolvePath(value);
+  let info;
+  try {
+    info = await stat(absolute);
+  } catch {
+    throw new Error(`kanban: workspace does not exist: ${JSON.stringify(absolute)}`);
+  }
+  if (!info.isDirectory()) {
+    throw new Error(`kanban: workspace is not a directory: ${JSON.stringify(absolute)}`);
+  }
+  return absolute;
+}
+
+/**
+ * Backfill pre-workspace rows into the process working directory, seed that
+ * workspace's counter, and set it active so an existing board keeps working.
+ */
+async function migrateDomain(domain) {
+  const todos = domain.table("todos");
+  const workspaces = domain.table("workspaces");
+  const global = domain.global;
+  const g = global.get();
+  const defaultWorkspace = resolvePath(process.cwd());
+
+  let next = typeof g.nextNumber === "number" ? g.nextNumber : 1;
+  const rows = [...todos.entries()].map(([id, value]) => ({ id, value }));
+
+  // Never reuse a number already on a card, even if the global lagged behind.
   for (const { value } of rows) {
     if (typeof value.number === "number") next = Math.max(next, value.number + 1);
   }
+
   const unnumbered = rows
     .filter(({ value }) => typeof value.number !== "number")
     .sort((a, b) => a.value.createdAt - b.value.createdAt);
-  for (const { id, value } of unnumbered) {
-    await table.put(id, {
-      ...value,
-      number: next,
-      description: typeof value.description === "string" ? value.description : "",
-    });
-    next += 1;
+  const assigned = new Map();
+  for (const { id } of unnumbered) assigned.set(id, next++);
+
+  for (const { id, value } of rows) {
+    const number = typeof value.number === "number" ? value.number : assigned.get(id);
+    const description = typeof value.description === "string" ? value.description : "";
+    const workspace = typeof value.workspace === "string" && value.workspace.length > 0
+      ? value.workspace
+      : defaultWorkspace;
+    if (value.number !== number || value.description !== description || value.workspace !== workspace) {
+      await todos.put(id, { ...value, number, description, workspace });
+    }
   }
-  if (next !== domain.global.get().nextNumber) {
-    await domain.global.set({ nextNumber: next });
+
+  if ((rows.length > 0 || typeof g.nextNumber === "number") && workspaces.get(defaultWorkspace) === undefined) {
+    await workspaces.put(defaultWorkspace, { path: defaultWorkspace, nextNumber: next, addedAt: Date.now() });
+  }
+
+  const prior = typeof g.activeWorkspace === "string" ? g.activeWorkspace : "";
+  const activeWorkspace = prior.length > 0 ? prior : (rows.length > 0 ? defaultWorkspace : "");
+  if (activeWorkspace !== (g.activeWorkspace ?? "")) {
+    await global.set({ activeWorkspace });
   }
 }
 
@@ -89,14 +153,23 @@ function sortTodos(todos) {
 class KanbanService extends TypertRemoteService {
   static inject = ["storageDomain", "tools", "systemPrompt", "agents"];
 
+  /**
+   * Persistent plugin configuration. Declared as a static field because the
+   * loader unwraps a default-exported class and reads `Config`/`inject` off it.
+   * The field is volatile so saving a new limit updates in place instead of
+   * restarting the plugin; `.simplify()` still persists it.
+   */
+  static Config = Schema.object({
+    max_parallel_tasks: Schema.natural().min(1).max(10).default(1).volatile(),
+  });
+
   constructor(ctx, config = {}) {
     super(ctx, "kanban");
+    this.config = config;
     this.domainPromise = this.openAndMigrate();
     this.domain = undefined;
     /** In-flight moves keyed by task id; duplicate clicks share one operation. */
     this.moves = new Map();
-    /** Serializes counter reads so concurrent adds never share a number. */
-    this.numberChain = Promise.resolve();
     ctx.effect(
       () => () => {
         this.domainPromise.then((d) => d.close()).catch(() => {});
@@ -108,60 +181,83 @@ class KanbanService extends TypertRemoteService {
 
   async openAndMigrate() {
     const domain = await this.ctx.storageDomain.open(kanbanDomain);
-    await migrateTodos(domain);
+    await migrateDomain(domain);
     return domain;
   }
 
-  async table() {
+  async table(name = "todos") {
     if (this.domain === undefined) this.domain = await this.domainPromise;
-    return this.domain.table("todos");
+    return this.domain.table(name);
   }
 
-  /** Reserve the next monotonic task number (serialized to avoid races). */
-  nextNumber() {
-    const operation = this.numberChain.then(async () => {
-      const domain = await this.domainPromise;
-      const next = domain.global.get().nextNumber;
-      await domain.global.set({ nextNumber: next + 1 });
-      return next;
-    });
-    this.numberChain = operation.then(
-      () => {},
-      () => {},
-    );
-    return operation;
+  async activeWorkspace() {
+    const domain = await this.domainPromise;
+    const active = domain.global.get().activeWorkspace;
+    if (typeof active !== "string" || active.length === 0) {
+      throw new Error("kanban: no workspace is selected; select a workspace first");
+    }
+    return active;
+  }
+
+  /** Atomically reserve the next number within one workspace's counter. */
+  async nextNumberFor(workspace) {
+    const table = await this.table("workspaces");
+    const updated = await table.update(workspace, (ws) => ({ ...ws, nextNumber: ws.nextNumber + 1 }));
+    return updated.nextNumber - 1;
+  }
+
+  readMaxParallel() {
+    const raw = this.config?.max_parallel_tasks;
+    const value = raw != null && typeof raw.get === "function" ? raw.get() : raw;
+    return typeof value === "number" && Number.isFinite(value) ? value : 1;
   }
 
   // ---- Remote methods (SRC discovery reads their parameter names) ----
 
   async list() {
-    const table = await this.table();
-    const todos = [...table.entries()].map(([, value]) => value);
-    return { todos: sortTodos(todos) };
+    const domain = await this.domainPromise;
+    const todosTable = await this.table("todos");
+    const active = domain.global.get().activeWorkspace;
+    const activeWorkspace = typeof active === "string" && active.length > 0 ? active : null;
+    const todos = activeWorkspace === null
+      ? []
+      : [...todosTable.entries()].map(([, value]) => value).filter((todo) => todo.workspace === activeWorkspace);
+    const workspacesTable = await this.table("workspaces");
+    const workspaces = [...workspacesTable.entries()]
+      .map(([, value]) => ({ path: value.path, addedAt: value.addedAt }))
+      .sort((a, b) => a.addedAt - b.addedAt);
+    return {
+      todos: sortTodos(todos),
+      activeWorkspace,
+      workspaces,
+      maxParallelTasks: this.readMaxParallel(),
+    };
   }
 
   async add(request) {
     const title = normalizeTitle(request?.title);
     const description = normalizeDescription(request?.description);
-    const number = await this.nextNumber();
+    const workspace = await this.activeWorkspace();
+    const number = await this.nextNumberFor(workspace);
     const now = Date.now();
     const todo = {
       id: `todo-${randomUUID()}`,
       number,
       title,
       description,
+      workspace,
       status: "todo",
       createdAt: now,
       updatedAt: now,
     };
-    const table = await this.table();
+    const table = await this.table("todos");
     await table.put(todo.id, todo);
     return todo;
   }
 
   async update(id, request) {
     if (typeof id !== "string" || id.length === 0) throw new Error("kanban: id is required");
-    const table = await this.table();
+    const table = await this.table("todos");
     const current = table.get(id);
     if (current === undefined) throw new Error(`kanban: no todo with id ${JSON.stringify(id)}`);
     const title = request?.title !== undefined ? normalizeTitle(request.title) : current.title;
@@ -192,7 +288,7 @@ class KanbanService extends TypertRemoteService {
   }
 
   async applyMove(id, status, sessionId) {
-    const table = await this.table();
+    const table = await this.table("todos");
     const current = table.get(id);
     if (current === undefined) throw new Error(`kanban: no todo with id ${JSON.stringify(id)}`);
     if (current.status === status) return current;
@@ -229,8 +325,9 @@ class KanbanService extends TypertRemoteService {
     const text =
       `The user started Kanban task ${label} (${JSON.stringify(todo.title)})` +
       (todo.description ? ` — ${todo.description}` : "") +
-      ` and selected this session to work on it. Read the board with kanban_list, do the work now, ` +
-      `then mark this task done with kanban_move (id ${JSON.stringify(todo.id)}, status "done"). ` +
+      (todo.workspace ? ` Workspace: ${todo.workspace}.` : "") +
+      ` Read the board with kanban_list, do the work now, then mark this task done ` +
+      `with kanban_move (id ${JSON.stringify(todo.id)}, status "done"). ` +
       `If you cannot finish, leave it in_progress and report the concrete blocker.`;
     const message = createUserMessage({
       content: [{ type: "text", text }],
@@ -242,9 +339,40 @@ class KanbanService extends TypertRemoteService {
 
   async deleteTodo(id) {
     if (typeof id !== "string" || id.length === 0) throw new Error("kanban: id is required");
-    const table = await this.table();
+    const table = await this.table("todos");
     await table.delete(id);
     return { removed: true };
+  }
+
+  async selectWorkspace(path) {
+    const absolute = await assertDirectory(path);
+    const table = await this.table("workspaces");
+    if (table.get(absolute) === undefined) {
+      await table.put(absolute, { path: absolute, nextNumber: 1, addedAt: Date.now() });
+    }
+    const domain = await this.domainPromise;
+    await domain.global.set({ activeWorkspace: absolute });
+    return { activeWorkspace: absolute };
+  }
+
+  async validateWorkspace(path) {
+    try {
+      await assertDirectory(path);
+      return { valid: true, isDirectory: true };
+    } catch {
+      return { valid: false, isDirectory: false };
+    }
+  }
+
+  async setSettings(request) {
+    const value = normalizeMaxParallel(request?.maxParallelTasks);
+    const entry = this.ctx.fiber?.entry;
+    const editor = this.ctx.get("configEditor");
+    if (entry === undefined || editor === undefined) {
+      throw new Error("kanban: settings cannot be saved in this profile");
+    }
+    await editor.edit(entry, (current) => ({ ...current, max_parallel_tasks: value }));
+    return { maxParallelTasks: value };
   }
 
   // ---- Agent tools ----
@@ -259,7 +387,8 @@ class KanbanService extends TypertRemoteService {
         "Check it with kanban_list at the start of work and whenever the user asks about progress. " +
         "Use kanban_move to mark a task in_progress when you begin it and done when you finish it; " +
         "use kanban_add to record follow-up tasks and kanban_remove to delete tasks. " +
-        "Statuses are todo, in_progress, done, and failed. Keep the board current so the user can see your process.",
+        "Statuses are todo, in_progress, done, and failed. Tasks belong to the active workspace " +
+        "selected on the board. Keep the board current so the user can see your process.",
     });
 
     const todoSchemaSpec = {
@@ -270,6 +399,7 @@ class KanbanService extends TypertRemoteService {
         number: { type: "number", required: true },
         title: { type: "string", required: true },
         description: { type: "string", required: true },
+        workspace: { type: "string", required: true },
         status: { type: "string", required: true, enum: STATUSES },
         createdAt: { type: "number", required: true },
         updatedAt: { type: "number", required: true },
@@ -295,10 +425,13 @@ class KanbanService extends TypertRemoteService {
     ctx.tools.register(
       defineTool({
         name: "kanban_list",
-        description: "List every task on the shared Kanban board with its status (todo, in_progress, done, failed).",
+        description: "List every task in the active workspace with its status (todo, in_progress, done, failed).",
         parameters: {},
         output: listOutput(),
-        execute: async () => this.list(),
+        execute: async () => {
+          const result = await this.list();
+          return { todos: result.todos };
+        },
         presentCall: () => ({ card: "generic", title: "List Kanban board", kind: "read" }),
       }),
     );
@@ -306,7 +439,7 @@ class KanbanService extends TypertRemoteService {
     ctx.tools.register(
       defineTool({
         name: "kanban_add",
-        description: "Add a task to the shared Kanban board.",
+        description: "Add a task to the active workspace on the shared Kanban board.",
         parameters: {
           title: { type: "string", required: true, description: "Short task description." },
           description: { type: "string", description: "Optional longer details or markdown." },
@@ -365,7 +498,16 @@ function markRemoteMethods(cls, methods) {
     }),
   });
 }
-markRemoteMethods(KanbanService, ["list", "add", "update", "move", "deleteTodo"]);
+markRemoteMethods(KanbanService, [
+  "list",
+  "add",
+  "update",
+  "move",
+  "deleteTodo",
+  "selectWorkspace",
+  "validateWorkspace",
+  "setSettings",
+]);
 
-export { migrateTodos };
+export { migrateDomain };
 export default KanbanService;

@@ -1,6 +1,6 @@
 {
   "name": "better-agentic-kanban",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": false,
   "type": "module",
   "description": "A Kanban board where you assign todos to DSH agent sessions and watch their progress.",
@@ -34,6 +34,7 @@
     "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
     "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "3.19.0",
     "zod": "^4.4.3"
   },
   "dsh": {

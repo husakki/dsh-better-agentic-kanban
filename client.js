@@ -18,10 +18,12 @@ window.__ModuleLoader__.load({
       number: zod.number(),
       title: zod.string(),
       description: zod.string(),
+      workspace: zod.string(),
       status: zod.enum(STATUSES),
       createdAt: zod.number(),
       updatedAt: zod.number(),
     });
+    const workspaceInfoSchema = zod.object({ path: zod.string(), addedAt: zod.number() });
     const KANBAN_REMOTE = {
       package: "better-agentic-kanban",
       descriptors: [
@@ -32,7 +34,14 @@ window.__ModuleLoader__.load({
           method: "list",
           invocation: { kind: "direct" },
           parameters: [],
-          result: codec(zod.object({ todos: zod.array(todoSchema) })),
+          result: codec(
+            zod.object({
+              todos: zod.array(todoSchema),
+              activeWorkspace: zod.string().nullable(),
+              workspaces: zod.array(workspaceInfoSchema),
+              maxParallelTasks: zod.number(),
+            }),
+          ),
         },
         {
           id: "better-agentic-kanban#kanban/add",
@@ -95,6 +104,40 @@ window.__ModuleLoader__.load({
           parameters: [{ name: "id", wire: "id", source: "json", codec: codec(zod.string()) }],
           result: codec(zod.object({ removed: zod.boolean() })),
         },
+        {
+          id: "better-agentic-kanban#kanban/selectWorkspace",
+          service: "kanban",
+          namespace: "kanban",
+          method: "selectWorkspace",
+          invocation: { kind: "direct" },
+          parameters: [{ name: "path", wire: "path", source: "json", codec: codec(zod.string()) }],
+          result: codec(zod.object({ activeWorkspace: zod.string() })),
+        },
+        {
+          id: "better-agentic-kanban#kanban/validateWorkspace",
+          service: "kanban",
+          namespace: "kanban",
+          method: "validateWorkspace",
+          invocation: { kind: "direct" },
+          parameters: [{ name: "path", wire: "path", source: "json", codec: codec(zod.string()) }],
+          result: codec(zod.object({ valid: zod.boolean(), isDirectory: zod.boolean() })),
+        },
+        {
+          id: "better-agentic-kanban#kanban/setSettings",
+          service: "kanban",
+          namespace: "kanban",
+          method: "setSettings",
+          invocation: { kind: "direct" },
+          parameters: [
+            {
+              name: "request",
+              wire: "request",
+              source: "json",
+              codec: codec(zod.object({ maxParallelTasks: zod.number() })),
+            },
+          ],
+          result: codec(zod.object({ maxParallelTasks: zod.number() })),
+        },
       ],
     };
 
@@ -114,6 +157,16 @@ window.__ModuleLoader__.load({
       "card.edit": "Edit",
       "card.delete": "Delete",
       "board.empty": "No tasks yet. Add one above or drag a card here.",
+      "workspace.placeholder": "Select a workspace",
+      "workspace.input.placeholder": "Or enter a directory path",
+      "workspace.select": "Select",
+      "workspace.empty": "Select a workspace to get started.",
+      "workspace.error": "Could not select that workspace.",
+      "settings.button": "Settings",
+      "settings.title": "Settings",
+      "settings.hint": "How many tasks the agent may run in parallel (1–10).",
+      "settings.error.range": "Enter a whole number between 1 and 10.",
+      "settings.error.save": "Could not save settings.",
       "edit.title": "Edit task",
       "edit.number": "Task number",
       "edit.title.placeholder": "Task title",
@@ -126,9 +179,12 @@ window.__ModuleLoader__.load({
     // ---- Styles (theme tokens only for colors) ----
     const CSS = `
 .kanban-plugin-root{display:flex;flex-direction:column;gap:12px;height:100%;padding:16px 20px;box-sizing:border-box;overflow:auto;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}
+.kanban-plugin-header{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.kanban-plugin-wsbar{display:flex;gap:8px;align-items:center;flex:1;min-width:300px;flex-wrap:wrap}
+.kanban-plugin-ws-select{max-width:280px}
 .kanban-plugin-addform{display:flex;flex-direction:column;gap:8px}
 .kanban-plugin-addrow{display:flex;gap:8px;align-items:center}
-.kanban-plugin-input{flex:1;min-width:0;height:34px;padding:0 12px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:13px;outline:none}
+.kanban-plugin-input{flex:1;min-width:0;height:34px;padding:0 12px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:13px;outline:none;box-sizing:border-box}
 .kanban-plugin-input:focus{border-color:var(--dsw-alias-brand-primary)}
 .kanban-plugin-input::placeholder{color:var(--dsw-alias-label-secondary)}
 .kanban-plugin-textarea{width:100%;min-height:52px;padding:8px 12px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:13px;font-family:inherit;resize:vertical;outline:none;box-sizing:border-box}
@@ -162,6 +218,7 @@ window.__ModuleLoader__.load({
 .kanban-plugin-chip:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary)}
 .kanban-plugin-chip-danger:hover{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
 .kanban-plugin-empty{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.kanban-plugin-settings-hint{font-size:12px;color:var(--dsw-alias-label-secondary)}
 .kanban-plugin-backdrop{position:fixed;inset:0;z-index:1000;background:color-mix(in srgb,var(--dsw-alias-bg-base) 60%,transparent);display:flex;align-items:flex-start;justify-content:center;padding-top:10vh}
 .kanban-plugin-modal{width:min(520px,90vw);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:12px;box-shadow:0 12px 40px color-mix(in srgb,#000 24%,transparent);display:flex;flex-direction:column;gap:10px;padding:14px}
 .kanban-plugin-modal-head{display:flex;align-items:center;justify-content:space-between}
@@ -171,7 +228,7 @@ window.__ModuleLoader__.load({
 `;
 
     function useBoard(kanbanReady) {
-      const [todos, setTodos] = React.useState(null);
+      const [data, setData] = React.useState(null);
       const [error, setError] = React.useState(null);
       const refresh = React.useCallback(async () => {
         try {
@@ -179,7 +236,7 @@ window.__ModuleLoader__.load({
           const res = await kanban.list();
           if (res && res.ok) {
             setError(null);
-            setTodos(res.value.todos);
+            setData(res.value);
           } else {
             setError((res && res.error && res.error.message) || "list failed");
           }
@@ -190,7 +247,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         refresh();
       }, [refresh]);
-      return { todos, error, refresh, setError };
+      return { data, error, refresh, setError };
     }
 
     function Card({ todo, onMove, onRemove, onEdit, onDragStart, onDragEnd, t }) {
@@ -285,6 +342,129 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function WorkspaceBar({ activeWorkspace, workspaces, onSelect, t }) {
+      const [draft, setDraft] = React.useState("");
+      const [busy, setBusy] = React.useState(false);
+      const [error, setError] = React.useState(null);
+
+      const select = async (path) => {
+        const trimmed = (path || "").trim();
+        if (!trimmed || busy) return;
+        setBusy(true);
+        setError(null);
+        const ok = await onSelect(trimmed);
+        if (ok) setDraft("");
+        else setError(t("workspace.error"));
+        setBusy(false);
+      };
+
+      return h(
+        "div",
+        { className: "kanban-plugin-wsbar" },
+        h(
+          "select",
+          {
+            className: "kanban-plugin-input kanban-plugin-ws-select",
+            value: activeWorkspace ?? "",
+            onChange: (e) => {
+              if (e.target.value) select(e.target.value);
+            },
+          },
+          h("option", { value: "", disabled: true }, t("workspace.placeholder")),
+          workspaces.map((ws) => h("option", { key: ws.path, value: ws.path }, ws.path)),
+        ),
+        h("input", {
+          className: "kanban-plugin-input",
+          value: draft,
+          placeholder: t("workspace.input.placeholder"),
+          onChange: (e) => setDraft(e.target.value),
+          onKeyDown: (e) => {
+            if (e.key === "Enter") select(draft);
+          },
+        }),
+        h(
+          "button",
+          { className: "kanban-plugin-btn", onClick: () => select(draft), disabled: busy || draft.trim() === "" },
+          t("workspace.select"),
+        ),
+        error ? h("div", { className: "kanban-plugin-error", role: "alert" }, error) : null,
+      );
+    }
+
+    function SettingsModal({ value, onSave, onClose, t }) {
+      const [draft, setDraft] = React.useState(String(value));
+      const [saving, setSaving] = React.useState(false);
+      const [error, setError] = React.useState(null);
+
+      const save = async () => {
+        const n = Number(draft);
+        if (!Number.isInteger(n) || n < 1 || n > 10) {
+          setError(t("settings.error.range"));
+          return;
+        }
+        setSaving(true);
+        setError(null);
+        const ok = await onSave(n);
+        if (!ok) setError(t("settings.error.save"));
+        else setSaving(false);
+      };
+
+      return h(
+        "div",
+        { className: "kanban-plugin-backdrop", onClick: () => onClose() },
+        h(
+          "div",
+          {
+            className: "kanban-plugin-modal",
+            role: "dialog",
+            "aria-modal": "true",
+            onClick: (e) => e.stopPropagation(),
+            onKeyDown: (e) => {
+              if (e.key === "Escape") onClose();
+            },
+          },
+          h(
+            "div",
+            { className: "kanban-plugin-modal-head" },
+            h("span", { className: "kanban-plugin-modal-title" }, t("settings.title")),
+          ),
+          h("input", {
+            className: "kanban-plugin-input",
+            type: "number",
+            min: 1,
+            max: 10,
+            step: 1,
+            value: draft,
+            autoFocus: true,
+            onChange: (e) => setDraft(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "Enter") save();
+            },
+          }),
+          h("div", { className: "kanban-plugin-settings-hint" }, t("settings.hint")),
+          error ? h("div", { className: "kanban-plugin-error", role: "alert" }, error) : null,
+          h(
+            "div",
+            { className: "kanban-plugin-modal-actions" },
+            h(
+              "button",
+              { className: "kanban-plugin-btn", onClick: () => onClose(), disabled: saving },
+              t("edit.cancel"),
+            ),
+            h(
+              "button",
+              {
+                className: "kanban-plugin-btn kanban-plugin-btn-primary",
+                onClick: save,
+                disabled: saving,
+              },
+              t("edit.save"),
+            ),
+          ),
+        ),
+      );
+    }
+
     function EditModal({ todo, onSave, onClose, t }) {
       const [title, setTitle] = React.useState(todo.title);
       const [description, setDescription] = React.useState(todo.description || "");
@@ -367,11 +547,12 @@ window.__ModuleLoader__.load({
     }
 
     function KanbanPage({ kanbanReady, t, useSessions }) {
-      const { todos, error, refresh, setError } = useBoard(kanbanReady);
+      const { data, error, refresh, setError } = useBoard(kanbanReady);
       const [draft, setDraft] = React.useState("");
       const [description, setDescription] = React.useState("");
       const [busy, setBusy] = React.useState(false);
       const [editingId, setEditingId] = React.useState(null);
+      const [showSettings, setShowSettings] = React.useState(false);
       const [dragId, setDragId] = React.useState(null);
       const [dragOver, setDragOver] = React.useState(null);
       // The board is root-scoped, so read the main-view session from the host's
@@ -383,7 +564,12 @@ window.__ModuleLoader__.load({
         return undefined;
       });
 
-      const editingTodo = editingId === null ? null : (todos || []).find((x) => x.id === editingId) || null;
+      const todos = data?.todos ?? [];
+      const activeWorkspace = data?.activeWorkspace ?? null;
+      const workspaces = data?.workspaces ?? [];
+      const maxParallelTasks = data?.maxParallelTasks ?? 1;
+
+      const editingTodo = editingId === null ? null : todos.find((x) => x.id === editingId) || null;
 
       const run = async (action) => {
         try {
@@ -426,6 +612,14 @@ window.__ModuleLoader__.load({
         return ok;
       };
 
+      const selectWorkspace = (path) => run((kanban) => kanban.selectWorkspace(path));
+
+      const saveSettings = async (n) => {
+        const ok = await run((kanban) => kanban.setSettings({ maxParallelTasks: n }));
+        if (ok) setShowSettings(false);
+        return ok;
+      };
+
       const openEdit = (id) => setEditingId(id);
       const closeEdit = () => setEditingId(null);
 
@@ -449,6 +643,23 @@ window.__ModuleLoader__.load({
         h("style", null, CSS),
         h(
           "div",
+          { className: "kanban-plugin-header" },
+          h(WorkspaceBar, { activeWorkspace, workspaces, onSelect: selectWorkspace, t }),
+          h(
+            "button",
+            {
+              className: "kanban-plugin-btn",
+              onClick: () => setShowSettings(true),
+              title: t("settings.title"),
+            },
+            t("settings.button"),
+          ),
+        ),
+        activeWorkspace === null
+          ? h("div", { className: "kanban-plugin-empty" }, t("workspace.empty"))
+          : null,
+        h(
+          "div",
           { className: "kanban-plugin-addform" },
           h(
             "div",
@@ -467,7 +678,7 @@ window.__ModuleLoader__.load({
               {
                 className: "kanban-plugin-btn kanban-plugin-btn-primary",
                 onClick: add,
-                disabled: busy || draft.trim() === "",
+                disabled: busy || draft.trim() === "" || activeWorkspace === null,
               },
               t("add.button"),
             ),
@@ -489,7 +700,7 @@ window.__ModuleLoader__.load({
               key: col.status,
               status: col.status,
               title: col.title,
-              todos: (todos || []).filter((x) => x.status === col.status),
+              todos: todos.filter((x) => x.status === col.status),
               onMove: move,
               onRemove: remove,
               onEdit: openEdit,
@@ -504,6 +715,9 @@ window.__ModuleLoader__.load({
         ),
         editingTodo
           ? h(EditModal, { todo: editingTodo, onSave: saveEdit, onClose: closeEdit, t })
+          : null,
+        showSettings
+          ? h(SettingsModal, { value: maxParallelTasks, onSave: saveSettings, onClose: () => setShowSettings(false), t })
           : null,
       );
     }

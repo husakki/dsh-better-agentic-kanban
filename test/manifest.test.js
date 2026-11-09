@@ -38,7 +38,7 @@ test("the Host publishes the expected remote methods", () => {
   assert.ok(marker, "remote method marker is missing");
   assert.deepEqual(
     marker.methods.map((entry) => entry.method),
-    ["list", "add", "update", "move", "deleteTodo"],
+    ["list", "add", "update", "move", "deleteTodo", "selectWorkspace", "validateWorkspace", "setSettings"],
   );
 });
 
@@ -61,6 +61,13 @@ test("the move session field matches between Host and client", () => {
   const client = readFileSync(join(root, "client.js"), "utf8");
   assert.match(client, /name:\s*"sessionId"/);
   assert.match(client, /wire:\s*"sessionId"/);
+});
+
+test("the service exposes a static Config schema", () => {
+  // The loader unwraps a default-exported class, so Config must live on the
+  // class (static), not as a sibling named export.
+  assert.ok(KanbanService.Config, "static Config is missing");
+  assert.ok(KanbanService.Config["~standard"], "Config is not a Schemastery schema");
 });
 
 test("display metadata and bundle patch are present", () => {
