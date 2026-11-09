@@ -189,3 +189,20 @@ test("migrateDomain keeps existing numbers, assigns workspaces, and never reuses
   assert.equal(domain.global.get().activeWorkspace, defaultWorkspace);
   assert.equal(domain.table("workspaces").get(defaultWorkspace).nextNumber, 10);
 });
+
+test("migrateDomain rehomes orphans to the fallback workspace and absorbs the counter", async () => {
+  const domain = fakeDomain(
+    [
+      { id: "a", number: 5, title: "A", description: "", workspace: "/old/path", status: "done", createdAt: 1, updatedAt: 1 },
+    ],
+    { workspaces: { "/old/path": { path: "/old/path", nextNumber: 9, addedAt: 1 } } },
+  );
+  const fallback = "/ws/current";
+
+  await migrateDomain(domain, { workspacePaths: new Set(["/ws/current"]), fallback });
+
+  assert.equal(domain.table("todos").get("a").workspace, fallback);
+  // Counter absorbs the old workspace counter (9), not just max number + 1 (6).
+  assert.equal(domain.table("workspaces").get(fallback).nextNumber, 9);
+  assert.equal(domain.global.get().activeWorkspace, fallback);
+});

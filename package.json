@@ -1,6 +1,6 @@
 {
   "name": "better-agentic-kanban",
-  "version": "0.3.0",
+  "version": "0.2.1",
   "private": false,
   "type": "module",
   "description": "A Kanban board where you assign todos to DSH agent sessions and watch their progress.",

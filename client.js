@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
       createdAt: zod.number(),
       updatedAt: zod.number(),
     });
-    const workspaceInfoSchema = zod.object({ path: zod.string(), addedAt: zod.number() });
+    const workspaceInfoSchema = zod.object({ id: zod.string(), path: zod.string(), title: zod.string() });
     const KANBAN_REMOTE = {
       package: "better-agentic-kanban",
       descriptors: [
@@ -110,17 +110,8 @@ window.__ModuleLoader__.load({
           namespace: "kanban",
           method: "selectWorkspace",
           invocation: { kind: "direct" },
-          parameters: [{ name: "path", wire: "path", source: "json", codec: codec(zod.string()) }],
+          parameters: [{ name: "id", wire: "id", source: "json", codec: codec(zod.string()) }],
           result: codec(zod.object({ activeWorkspace: zod.string() })),
-        },
-        {
-          id: "better-agentic-kanban#kanban/validateWorkspace",
-          service: "kanban",
-          namespace: "kanban",
-          method: "validateWorkspace",
-          invocation: { kind: "direct" },
-          parameters: [{ name: "path", wire: "path", source: "json", codec: codec(zod.string()) }],
-          result: codec(zod.object({ valid: zod.boolean(), isDirectory: zod.boolean() })),
         },
         {
           id: "better-agentic-kanban#kanban/setSettings",
@@ -158,10 +149,7 @@ window.__ModuleLoader__.load({
       "card.delete": "Delete",
       "board.empty": "No tasks yet. Add one above or drag a card here.",
       "workspace.placeholder": "Select a workspace",
-      "workspace.input.placeholder": "Or enter a directory path",
-      "workspace.select": "Select",
       "workspace.empty": "Select a workspace to get started.",
-      "workspace.error": "Could not select that workspace.",
       "settings.button": "Settings",
       "settings.title": "Settings",
       "settings.hint": "How many tasks the agent may run in parallel (1–10).",
@@ -343,21 +331,7 @@ window.__ModuleLoader__.load({
     }
 
     function WorkspaceBar({ activeWorkspace, workspaces, onSelect, t }) {
-      const [draft, setDraft] = React.useState("");
-      const [busy, setBusy] = React.useState(false);
-      const [error, setError] = React.useState(null);
-
-      const select = async (path) => {
-        const trimmed = (path || "").trim();
-        if (!trimmed || busy) return;
-        setBusy(true);
-        setError(null);
-        const ok = await onSelect(trimmed);
-        if (ok) setDraft("");
-        else setError(t("workspace.error"));
-        setBusy(false);
-      };
-
+      const active = workspaces.find((ws) => ws.path === activeWorkspace);
       return h(
         "div",
         { className: "kanban-plugin-wsbar" },
@@ -365,29 +339,14 @@ window.__ModuleLoader__.load({
           "select",
           {
             className: "kanban-plugin-input kanban-plugin-ws-select",
-            value: activeWorkspace ?? "",
+            value: active?.id ?? "",
             onChange: (e) => {
-              if (e.target.value) select(e.target.value);
+              if (e.target.value) onSelect(e.target.value);
             },
           },
           h("option", { value: "", disabled: true }, t("workspace.placeholder")),
-          workspaces.map((ws) => h("option", { key: ws.path, value: ws.path }, ws.path)),
+          workspaces.map((ws) => h("option", { key: ws.id, value: ws.id }, ws.title)),
         ),
-        h("input", {
-          className: "kanban-plugin-input",
-          value: draft,
-          placeholder: t("workspace.input.placeholder"),
-          onChange: (e) => setDraft(e.target.value),
-          onKeyDown: (e) => {
-            if (e.key === "Enter") select(draft);
-          },
-        }),
-        h(
-          "button",
-          { className: "kanban-plugin-btn", onClick: () => select(draft), disabled: busy || draft.trim() === "" },
-          t("workspace.select"),
-        ),
-        error ? h("div", { className: "kanban-plugin-error", role: "alert" }, error) : null,
       );
     }
 
@@ -612,7 +571,7 @@ window.__ModuleLoader__.load({
         return ok;
       };
 
-      const selectWorkspace = (path) => run((kanban) => kanban.selectWorkspace(path));
+      const selectWorkspace = (id) => run((kanban) => kanban.selectWorkspace(id));
 
       const saveSettings = async (n) => {
         const ok = await run((kanban) => kanban.setSettings({ maxParallelTasks: n }));

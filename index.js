@@ -1,4 +1,3 @@
-import { stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import Schema from "@deepseek-ai/schemastery";
@@ -76,39 +75,24 @@ function normalizeMaxParallel(value) {
   return value;
 }
 
-/** Resolve and validate a workspace directory path, returning its absolute form. */
-async function assertDirectory(value) {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error("kanban: workspace path must be a non-empty string");
-  }
-  const absolute = resolvePath(value);
-  let info;
-  try {
-    info = await stat(absolute);
-  } catch {
-    throw new Error(`kanban: workspace does not exist: ${JSON.stringify(absolute)}`);
-  }
-  if (!info.isDirectory()) {
-    throw new Error(`kanban: workspace is not a directory: ${JSON.stringify(absolute)}`);
-  }
-  return absolute;
-}
-
 /**
- * Backfill pre-workspace rows into the process working directory, seed that
- * workspace's counter, and set it active so an existing board keeps working.
+ * Backfill pre-workspace rows into a DeepSeek Harness workspace, rehome rows
+ * whose directory is no longer a registered workspace, seed that workspace's
+ * counter, and set it active so an existing board keeps working.
  */
-async function migrateDomain(domain) {
+async function migrateDomain(domain, { workspacePaths = new Set(), fallback = resolvePath(process.cwd()) } = {}) {
   const todos = domain.table("todos");
   const workspaces = domain.table("workspaces");
   const global = domain.global;
   const g = global.get();
-  const defaultWorkspace = resolvePath(process.cwd());
 
+  // Seed the counter above every number already assigned, including counters
+  // of workspaces that are being folded away, so a number is never reused.
   let next = typeof g.nextNumber === "number" ? g.nextNumber : 1;
+  for (const [, ws] of workspaces.entries()) {
+    if (typeof ws.nextNumber === "number") next = Math.max(next, ws.nextNumber);
+  }
   const rows = [...todos.entries()].map(([id, value]) => ({ id, value }));
-
-  // Never reuse a number already on a card, even if the global lagged behind.
   for (const { value } of rows) {
     if (typeof value.number === "number") next = Math.max(next, value.number + 1);
   }
@@ -122,20 +106,24 @@ async function migrateDomain(domain) {
   for (const { id, value } of rows) {
     const number = typeof value.number === "number" ? value.number : assigned.get(id);
     const description = typeof value.description === "string" ? value.description : "";
-    const workspace = typeof value.workspace === "string" && value.workspace.length > 0
-      ? value.workspace
-      : defaultWorkspace;
+    const current = typeof value.workspace === "string" && value.workspace.length > 0 ? value.workspace : "";
+    const workspace = workspacePaths.has(current) ? current : fallback;
     if (value.number !== number || value.description !== description || value.workspace !== workspace) {
       await todos.put(id, { ...value, number, description, workspace });
     }
   }
 
-  if ((rows.length > 0 || typeof g.nextNumber === "number") && workspaces.get(defaultWorkspace) === undefined) {
-    await workspaces.put(defaultWorkspace, { path: defaultWorkspace, nextNumber: next, addedAt: Date.now() });
+  const existing = workspaces.get(fallback);
+  if (existing === undefined || existing.nextNumber < next) {
+    await workspaces.put(fallback, {
+      path: fallback,
+      nextNumber: Math.max(existing?.nextNumber ?? 0, next),
+      addedAt: existing?.addedAt ?? Date.now(),
+    });
   }
 
   const prior = typeof g.activeWorkspace === "string" ? g.activeWorkspace : "";
-  const activeWorkspace = prior.length > 0 ? prior : (rows.length > 0 ? defaultWorkspace : "");
+  const activeWorkspace = workspacePaths.has(prior) ? prior : fallback;
   if (activeWorkspace !== (g.activeWorkspace ?? "")) {
     await global.set({ activeWorkspace });
   }
@@ -151,7 +139,7 @@ function sortTodos(todos) {
  * and through agent tools for the model.
  */
 class KanbanService extends TypertRemoteService {
-  static inject = ["storageDomain", "tools", "systemPrompt", "agents"];
+  static inject = ["storageDomain", "tools", "systemPrompt", "agents", "workspaceRegistry"];
 
   /**
    * Persistent plugin configuration. Declared as a static field because the
@@ -181,8 +169,23 @@ class KanbanService extends TypertRemoteService {
 
   async openAndMigrate() {
     const domain = await this.ctx.storageDomain.open(kanbanDomain);
-    await migrateDomain(domain);
+    const registry = this.ctx.workspaceRegistry;
+    const workspaces = registry ? registry.list() : [];
+    const workspacePaths = new Set(workspaces.map((workspace) => workspace.path));
+    await migrateDomain(domain, { workspacePaths, fallback: this.defaultWorkspacePath() });
     return domain;
+  }
+
+  /** Prefer the DSH workspace containing the process cwd; else the first one. */
+  defaultWorkspacePath() {
+    const registry = this.ctx.workspaceRegistry;
+    const list = registry ? registry.list() : [];
+    const cwd = resolvePath(process.cwd());
+    if (list.length === 0) return cwd;
+    const containing = list
+      .filter((workspace) => cwd === workspace.path || cwd.startsWith(`${workspace.path}/`))
+      .sort((a, b) => b.path.length - a.path.length)[0];
+    return (containing ?? list[0]).path;
   }
 
   async table(name = "todos") {
@@ -222,10 +225,12 @@ class KanbanService extends TypertRemoteService {
     const todos = activeWorkspace === null
       ? []
       : [...todosTable.entries()].map(([, value]) => value).filter((todo) => todo.workspace === activeWorkspace);
-    const workspacesTable = await this.table("workspaces");
-    const workspaces = [...workspacesTable.entries()]
-      .map(([, value]) => ({ path: value.path, addedAt: value.addedAt }))
-      .sort((a, b) => a.addedAt - b.addedAt);
+    const registry = this.ctx.workspaceRegistry;
+    const workspaces = (registry ? registry.list() : []).map((workspace) => ({
+      id: workspace.id,
+      path: workspace.path,
+      title: workspace.title,
+    }));
     return {
       todos: sortTodos(todos),
       activeWorkspace,
@@ -344,24 +349,19 @@ class KanbanService extends TypertRemoteService {
     return { removed: true };
   }
 
-  async selectWorkspace(path) {
-    const absolute = await assertDirectory(path);
+  async selectWorkspace(id) {
+    if (typeof id !== "string" || id.length === 0) throw new Error("kanban: workspace id is required");
+    const registry = this.ctx.workspaceRegistry;
+    const workspace = registry?.get(id);
+    if (workspace === undefined) throw new Error(`kanban: no workspace with id ${JSON.stringify(id)}`);
+    const path = workspace.path;
     const table = await this.table("workspaces");
-    if (table.get(absolute) === undefined) {
-      await table.put(absolute, { path: absolute, nextNumber: 1, addedAt: Date.now() });
+    if (table.get(path) === undefined) {
+      await table.put(path, { path, nextNumber: 1, addedAt: Date.now() });
     }
     const domain = await this.domainPromise;
-    await domain.global.set({ activeWorkspace: absolute });
-    return { activeWorkspace: absolute };
-  }
-
-  async validateWorkspace(path) {
-    try {
-      await assertDirectory(path);
-      return { valid: true, isDirectory: true };
-    } catch {
-      return { valid: false, isDirectory: false };
-    }
+    await domain.global.set({ activeWorkspace: path });
+    return { activeWorkspace: path };
   }
 
   async setSettings(request) {
@@ -505,7 +505,6 @@ markRemoteMethods(KanbanService, [
   "move",
   "deleteTodo",
   "selectWorkspace",
-  "validateWorkspace",
   "setSettings",
 ]);
 

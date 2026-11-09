@@ -6,12 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-11-09
+## [0.2.1] - 2026-11-09
 
 ### Added
 
-- Workspace selection: pick a local directory and tasks belong to it; the board
-  shows only the active workspace's cards.
+- Workspace selection: pick a DeepSeek Harness workspace by name; the board shows
+  only that workspace's cards.
 - Per-workspace task numbering: counters are independent per workspace and never
   reuse a number after deletion.
 - A settings menu with `max_parallel_tasks` (1–10, default 1), persisted to
@@ -19,8 +19,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Storage domain bumped to version 3 with a migration that assigns pre-existing
-  tasks to the process working directory and seeds that workspace's counter.
+- The workspace selector lists DeepSeek Harness workspaces by title and no
+  longer accepts a free-text directory path.
+- Storage domain bumped to version 3 with a migration that rehomes pre-existing
+  tasks into their containing DeepSeek Harness workspace and preserves counters.
 
 ## [0.2.0] - 2026-11-09
 
