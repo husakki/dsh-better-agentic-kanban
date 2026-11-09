@@ -38,7 +38,7 @@ test("the Host publishes the expected remote methods", () => {
   assert.ok(marker, "remote method marker is missing");
   assert.deepEqual(
     marker.methods.map((entry) => entry.method),
-    ["list", "add", "move", "deleteTodo"],
+    ["list", "add", "update", "move", "deleteTodo"],
   );
 });
 

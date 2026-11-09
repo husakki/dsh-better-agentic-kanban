@@ -6,23 +6,27 @@ works through it. The board is the hand-off point between you and the agent.
 
 ## Status
 
-Early development (`0.1.x`). The core board, task CRUD, and agent wake-up work.
-Workspace binding, Auto mode, concurrency settings, drag-and-drop, per-workspace
-numbering, timers, and run summaries are planned but not implemented yet.
+Early development (`0.2.x`). The board, task CRUD, numbering, descriptions,
+in-place editing, drag-and-drop, and agent wake-up work. Workspace binding,
+Auto mode, concurrency settings, timers, and run summaries are planned but not
+implemented yet.
 
 ## What works now
 
-- Three columns: **Todo**, **In Progress**, **Done**, with counts.
-- Add a task from the board; click **Start** to hand it to the agent session you
-  are viewing.
-- **Done**, **Reopen**, and **Delete** actions on cards.
+- Four columns: **Backlog**, **In Progress**, **Done**, and **Failed**, with counts.
+- Tasks are numbered (`#1`, `#2`, …); a number is never reused after a delete.
+- Add a task with a title and an optional markdown description; click a card's
+  title (or **Edit**) to change them inline.
+- Drag cards between columns, or use the **Start** / **Done** / **Reopen** /
+  **Delete** actions.
+- Click **Start** to hand a task to the agent session you are viewing.
 - Four agent tools: `kanban_list`, `kanban_add`, `kanban_move`, `kanban_remove`.
 - A per-task in-flight guard, so a double click or retry cannot start the same
   task twice.
 - The agent is told the durable task id, so it can update exactly that card.
 
-> The board is currently global to the plugin profile. Workspace-scoped boards
-> and numbering arrive with the workspace story in the roadmap.
+> The board is currently global to the plugin profile (a single implicit
+> workspace). Selecting multiple workspaces arrives with Sprint 2 in the roadmap.
 
 ## Requirements
 
@@ -51,14 +55,14 @@ expecting the new Host row or tools.
 
 ## Use
 
-1. Add a task with a short title.
-2. Open the session you want to run the task and click **Start** on the card.
-   Only that session is woken.
+1. Add a task with a title and an optional description.
+2. Open the session you want to run the task, then click **Start** (or drag the
+   card into **In Progress**). Only that session is woken.
 3. Watch the card move to **In Progress**. The agent reads the board, does the
    work, and marks the card **Done** when it finishes. If it cannot finish, it
    leaves the card in progress and reports the blocker.
-4. Click **Done** on a completed card to file it, or **Reopen** / **Delete** as
-   needed.
+4. Click a card's title to edit its title or description. Drag cards between
+   columns, or use **Done** / **Reopen** / **Delete** as needed.
 
 ## Development
 

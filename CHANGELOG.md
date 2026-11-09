@@ -6,6 +6,27 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
+### Added
+
+- Per-workspace task numbering (`#1`, `#2`, …) that never reuses a number after
+  deletion; the counter persists in the board's storage domain.
+- Optional markdown `description` on every task, settable at creation and editable.
+- In-place task editing: click a card (or press Edit) to change the title and
+  description; `Escape` or clicking outside discards unsaved input.
+- Drag-and-drop between columns with hover feedback on the drop target.
+- A `Failed` column and status so incomplete or blocked work can be parked and
+  reopened.
+
+### Changed
+
+- The board now has four columns: Backlog, In Progress, Done, and Failed.
+- Agent tools (`kanban_add`, `kanban_move`, `kanban_list`) expose task numbers,
+  descriptions, and the `failed` status.
+- Storage domain bumped to version 2 with a migration that backfills numbers and
+  descriptions for boards created before `0.2.0`.
+
 ## [0.1.0] - 2026-11-09
 
 ### Added

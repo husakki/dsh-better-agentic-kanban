@@ -8,12 +8,17 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 /** Stable descriptor key shared with the Gateway's SRC (source-mode) discovery. */
 const REMOTE_METHOD_DESCRIPTOR = "@deepseek-ai/dsh-typert-protocol/remote-methods";
 
-const STATUSES = ["todo", "in_progress", "done"];
+const STATUSES = ["todo", "in_progress", "done", "failed"];
 
 /** Durable todo record, validated on every open and write. */
 const todoSchema = zod.object({
   id: zod.string().min(1),
+  // `number` and `description` are optional here only so version-1 rows (which
+  // predate both fields) still validate; the open-time migration backfills them
+  // and every new write sets both explicitly.
+  number: zod.number().int().positive().optional(),
   title: zod.string().min(1),
+  description: zod.string().optional(),
   status: zod.enum(STATUSES),
   createdAt: zod.number(),
   updatedAt: zod.number(),
@@ -22,9 +27,16 @@ const todoSchema = zod.object({
 /** The board is a single global KV domain persisted by the JSON storage backend. */
 const kanbanDomain = defineDomain({
   name: "kanban",
-  version: 1,
+  version: 2,
+  // Version 1 predates task numbers and descriptions; admit those rows and
+  // backfill them in `migrateTodos` rather than bricking an existing board.
+  compatibleVersions: [1],
   tables: {
     todos: domainTable(todoSchema),
+  },
+  global: {
+    schema: zod.object({ nextNumber: zod.number().int().min(1) }),
+    initial: { nextNumber: 1 },
   },
 });
 
@@ -33,6 +45,36 @@ function normalizeTitle(value) {
     throw new Error("kanban: title must be a non-empty string");
   }
   return value.trim();
+}
+
+function normalizeDescription(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") throw new Error("kanban: description must be a string");
+  return value;
+}
+
+/** Backfill version-1 rows and keep the monotonic number counter honest. */
+async function migrateTodos(domain) {
+  const table = domain.table("todos");
+  let next = domain.global.get().nextNumber;
+  const rows = [...table.entries()].map(([id, value]) => ({ id, value }));
+  for (const { value } of rows) {
+    if (typeof value.number === "number") next = Math.max(next, value.number + 1);
+  }
+  const unnumbered = rows
+    .filter(({ value }) => typeof value.number !== "number")
+    .sort((a, b) => a.value.createdAt - b.value.createdAt);
+  for (const { id, value } of unnumbered) {
+    await table.put(id, {
+      ...value,
+      number: next,
+      description: typeof value.description === "string" ? value.description : "",
+    });
+    next += 1;
+  }
+  if (next !== domain.global.get().nextNumber) {
+    await domain.global.set({ nextNumber: next });
+  }
 }
 
 function sortTodos(todos) {
@@ -49,10 +91,12 @@ class KanbanService extends TypertRemoteService {
 
   constructor(ctx, config = {}) {
     super(ctx, "kanban");
-    this.domainPromise = ctx.storageDomain.open(kanbanDomain);
+    this.domainPromise = this.openAndMigrate();
     this.domain = undefined;
     /** In-flight moves keyed by task id; duplicate clicks share one operation. */
     this.moves = new Map();
+    /** Serializes counter reads so concurrent adds never share a number. */
+    this.numberChain = Promise.resolve();
     ctx.effect(
       () => () => {
         this.domainPromise.then((d) => d.close()).catch(() => {});
@@ -62,9 +106,30 @@ class KanbanService extends TypertRemoteService {
     this.registerTools();
   }
 
+  async openAndMigrate() {
+    const domain = await this.ctx.storageDomain.open(kanbanDomain);
+    await migrateTodos(domain);
+    return domain;
+  }
+
   async table() {
     if (this.domain === undefined) this.domain = await this.domainPromise;
     return this.domain.table("todos");
+  }
+
+  /** Reserve the next monotonic task number (serialized to avoid races). */
+  nextNumber() {
+    const operation = this.numberChain.then(async () => {
+      const domain = await this.domainPromise;
+      const next = domain.global.get().nextNumber;
+      await domain.global.set({ nextNumber: next + 1 });
+      return next;
+    });
+    this.numberChain = operation.then(
+      () => {},
+      () => {},
+    );
+    return operation;
   }
 
   // ---- Remote methods (SRC discovery reads their parameter names) ----
@@ -77,11 +142,34 @@ class KanbanService extends TypertRemoteService {
 
   async add(request) {
     const title = normalizeTitle(request?.title);
+    const description = normalizeDescription(request?.description);
+    const number = await this.nextNumber();
     const now = Date.now();
-    const todo = { id: `todo-${randomUUID()}`, title, status: "todo", createdAt: now, updatedAt: now };
+    const todo = {
+      id: `todo-${randomUUID()}`,
+      number,
+      title,
+      description,
+      status: "todo",
+      createdAt: now,
+      updatedAt: now,
+    };
     const table = await this.table();
     await table.put(todo.id, todo);
     return todo;
+  }
+
+  async update(id, request) {
+    if (typeof id !== "string" || id.length === 0) throw new Error("kanban: id is required");
+    const table = await this.table();
+    const current = table.get(id);
+    if (current === undefined) throw new Error(`kanban: no todo with id ${JSON.stringify(id)}`);
+    const title = request?.title !== undefined ? normalizeTitle(request.title) : current.title;
+    const description =
+      request?.description !== undefined ? normalizeDescription(request.description) : (current.description ?? "");
+    const next = { ...current, title, description, updatedAt: Date.now() };
+    await table.put(id, next);
+    return next;
   }
 
   async move(id, status, sessionId) {
@@ -137,15 +225,15 @@ class KanbanService extends TypertRemoteService {
       ? undefined
       : roots.find((agent) => agent.id === sessionId);
     const target = requested ?? roots[roots.length - 1];
+    const label = todo.number === undefined ? todo.id : `#${todo.number} (${todo.id})`;
+    const text =
+      `The user started Kanban task ${label} (${JSON.stringify(todo.title)})` +
+      (todo.description ? ` — ${todo.description}` : "") +
+      ` and selected this session to work on it. Read the board with kanban_list, do the work now, ` +
+      `then mark this task done with kanban_move (id ${JSON.stringify(todo.id)}, status "done"). ` +
+      `If you cannot finish, leave it in_progress and report the concrete blocker.`;
     const message = createUserMessage({
-      content: [{
-        type: "text",
-        text:
-          `The user started Kanban task ${JSON.stringify(todo.id)} (${JSON.stringify(todo.title)}) ` +
-          `and selected this session to work on it. Read the board with kanban_list, do the work now, ` +
-          `then mark this task done with kanban_move (id ${JSON.stringify(todo.id)}, status "done"). ` +
-          `If you cannot finish, leave it in_progress and report the concrete blocker.`,
-      }],
+      content: [{ type: "text", text }],
       source: { kind: "kanban" },
     });
     target.followup(message);
@@ -171,7 +259,7 @@ class KanbanService extends TypertRemoteService {
         "Check it with kanban_list at the start of work and whenever the user asks about progress. " +
         "Use kanban_move to mark a task in_progress when you begin it and done when you finish it; " +
         "use kanban_add to record follow-up tasks and kanban_remove to delete tasks. " +
-        "Statuses are todo, in_progress, and done. Keep the board current so the user can see your process.",
+        "Statuses are todo, in_progress, done, and failed. Keep the board current so the user can see your process.",
     });
 
     const todoSchemaSpec = {
@@ -179,7 +267,9 @@ class KanbanService extends TypertRemoteService {
       additionalProperties: false,
       properties: {
         id: { type: "string", required: true },
+        number: { type: "number", required: true },
         title: { type: "string", required: true },
+        description: { type: "string", required: true },
         status: { type: "string", required: true, enum: STATUSES },
         createdAt: { type: "number", required: true },
         updatedAt: { type: "number", required: true },
@@ -205,7 +295,7 @@ class KanbanService extends TypertRemoteService {
     ctx.tools.register(
       defineTool({
         name: "kanban_list",
-        description: "List every task on the shared Kanban board with its status (todo, in_progress, done).",
+        description: "List every task on the shared Kanban board with its status (todo, in_progress, done, failed).",
         parameters: {},
         output: listOutput(),
         execute: async () => this.list(),
@@ -219,9 +309,10 @@ class KanbanService extends TypertRemoteService {
         description: "Add a task to the shared Kanban board.",
         parameters: {
           title: { type: "string", required: true, description: "Short task description." },
+          description: { type: "string", description: "Optional longer details or markdown." },
         },
         output: todoOutput(),
-        execute: async (args) => this.add({ title: args.title }),
+        execute: async (args) => this.add({ title: args.title, description: args.description }),
         presentCall: (args) => ({ card: "generic", title: "Add Kanban task", kind: "other", rawInput: args.title }),
       }),
     );
@@ -229,7 +320,7 @@ class KanbanService extends TypertRemoteService {
     ctx.tools.register(
       defineTool({
         name: "kanban_move",
-        description: "Change a Kanban task's status to todo, in_progress, or done.",
+        description: "Change a Kanban task's status to todo, in_progress, done, or failed.",
         parameters: {
           id: { type: "string", required: true, description: "Task id from kanban_list." },
           status: { type: "string", required: true, enum: STATUSES, description: "New status." },
@@ -274,6 +365,7 @@ function markRemoteMethods(cls, methods) {
     }),
   });
 }
-markRemoteMethods(KanbanService, ["list", "add", "move", "deleteTodo"]);
+markRemoteMethods(KanbanService, ["list", "add", "update", "move", "deleteTodo"]);
 
+export { migrateTodos };
 export default KanbanService;
