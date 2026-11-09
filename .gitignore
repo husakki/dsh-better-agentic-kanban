@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+coverage/
+*.log
+*.tgz
+.DS_Store
+
+# Local development notes; not part of the published plugin
+AGENT.md
+ROADMAP.md
+docs/
