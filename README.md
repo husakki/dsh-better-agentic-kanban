@@ -70,10 +70,6 @@ CI=1 pnpm install --frozen-lockfile --store-dir .pnpm-store
 npm run check
 ```
 
-Agent notes (`AGENT.md`, `ROADMAP.md`, `docs/`) are local-only and git-ignored;
-the published repository contains the runtime, tests, CI, README, license, and
-changelog.
-
 ## Design notes
 
 - Host state lives in a DSH storage domain (`kanban` / `todos`), not a private
