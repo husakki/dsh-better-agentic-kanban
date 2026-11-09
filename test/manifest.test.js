@@ -50,11 +50,15 @@ test("the client bundle and remote descriptors use the package name", () => {
 });
 
 test("the move session field matches between Host and client", () => {
-  const host = readFileSync(join(root, "index.js"), "utf8");
+  // The Gateway reads the Host method's parameter names directly; the client
+  // descriptor must send the same wire field or the call is rejected.
+  const source = Function.prototype.toString.call(KanbanService.prototype.move);
+  const open = source.indexOf("(");
+  const close = source.indexOf(")", open + 1);
+  const hostFields = source.slice(open + 1, close).split(",").map((part) => part.trim());
+  assert.deepEqual(hostFields, ["id", "status", "sessionId"]);
+
   const client = readFileSync(join(root, "client.js"), "utf8");
-  // SRC discovery reads the Host method's parameter names; the client descriptor
-  // must send the same wire field or the Gateway rejects the call.
-  assert.match(host, /async move\(id, status, sessionId\)/);
   assert.match(client, /name:\s*"sessionId"/);
   assert.match(client, /wire:\s*"sessionId"/);
 });
