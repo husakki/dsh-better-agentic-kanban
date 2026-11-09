@@ -303,7 +303,7 @@ class KanbanService extends TypertRemoteService {
     // kanban_move must not re-wake itself or another agent.
     if (current.status === "todo" && status === "in_progress" && this.ctx.agents.currentInitiator() === undefined) {
       try {
-        this.wakeForTask(next, sessionId);
+        await this.startTask(next, sessionId);
       } catch (error) {
         await table.put(id, current);
         throw error;
@@ -312,20 +312,8 @@ class KanbanService extends TypertRemoteService {
     return next;
   }
 
-  /**
-   * Wake exactly one root agent when the user moves a task into In Progress.
-   * The client sends the session it is viewing; otherwise use the most recent
-   * root. Never fan one task prompt out to every live root.
-   */
-  wakeForTask(todo, sessionId) {
-    const roots = this.ctx.agents.roots();
-    if (roots.length === 0) {
-      throw new Error("kanban: no live agent session is available to start this task; open a session first");
-    }
-    const requested = sessionId === undefined
-      ? undefined
-      : roots.find((agent) => agent.id === sessionId);
-    const target = requested ?? roots[roots.length - 1];
+  /** Build the user message handed to the session that runs a task. */
+  taskMessage(todo) {
     const label = todo.number === undefined ? todo.id : `#${todo.number} (${todo.id})`;
     const text =
       `The user started Kanban task ${label} (${JSON.stringify(todo.title)})` +
@@ -334,12 +322,41 @@ class KanbanService extends TypertRemoteService {
       ` Read the board with kanban_list, do the work now, then mark this task done ` +
       `with kanban_move (id ${JSON.stringify(todo.id)}, status "done"). ` +
       `If you cannot finish, leave it in_progress and report the concrete blocker.`;
-    const message = createUserMessage({
+    return createUserMessage({
       content: [{ type: "text", text }],
       source: { kind: "kanban" },
     });
-    target.followup(message);
-    return target.id;
+  }
+
+  /**
+   * Start one task. By default a fresh isolated session is spawned with its
+   * working directory bound to the task's workspace; a `targetSessionId`
+   * override reuses an existing live session instead. Never fan one prompt out
+   * to every live root.
+   */
+  async startTask(todo, targetSessionId) {
+    if (targetSessionId !== undefined && targetSessionId !== null && targetSessionId !== "") {
+      const target =
+        this.ctx.agents.get(targetSessionId) ??
+        this.ctx.agents.roots().find((agent) => agent.id === targetSessionId);
+      if (target === undefined) {
+        throw new Error(`kanban: no live session with id ${JSON.stringify(targetSessionId)}`);
+      }
+      target.followup(this.taskMessage(todo));
+      return target.id;
+    }
+    const sessionId = `kanban-${randomUUID()}`;
+    const handle = await this.ctx.agents.create({
+      sessionId,
+      meta: { cwd: todo.workspace },
+    });
+    handle.agent.followup(this.taskMessage(todo));
+    return sessionId;
+  }
+
+  /** Live root sessions, for the start override picker. */
+  listSessions() {
+    return { sessions: this.ctx.agents.roots().map((agent) => ({ id: agent.id })) };
   }
 
   async deleteTodo(id) {
@@ -505,6 +522,7 @@ markRemoteMethods(KanbanService, [
   "move",
   "deleteTodo",
   "selectWorkspace",
+  "listSessions",
   "setSettings",
 ]);
 

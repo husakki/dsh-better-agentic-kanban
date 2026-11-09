@@ -114,6 +114,15 @@ window.__ModuleLoader__.load({
           result: codec(zod.object({ activeWorkspace: zod.string() })),
         },
         {
+          id: "better-agentic-kanban#kanban/listSessions",
+          service: "kanban",
+          namespace: "kanban",
+          method: "listSessions",
+          invocation: { kind: "direct" },
+          parameters: [],
+          result: codec(zod.object({ sessions: zod.array(zod.object({ id: zod.string() })) })),
+        },
+        {
           id: "better-agentic-kanban#kanban/setSettings",
           service: "kanban",
           namespace: "kanban",
@@ -143,6 +152,7 @@ window.__ModuleLoader__.load({
       "add.description.placeholder": "Description (optional, markdown)",
       "add.button": "Add",
       "card.start": "Start",
+      "card.startIn": "Start in…",
       "card.reopen": "Reopen",
       "card.done": "Done",
       "card.edit": "Edit",
@@ -162,6 +172,10 @@ window.__ModuleLoader__.load({
       "edit.save": "Save",
       "edit.cancel": "Cancel",
       "edit.error.save": "Could not save changes.",
+      "start.title": "Start task",
+      "start.newSession": "New session",
+      "start.noLiveSessions": "No live sessions to reuse.",
+      "start.cancel": "Cancel",
     };
 
     // ---- Styles (theme tokens only for colors) ----
@@ -213,6 +227,9 @@ window.__ModuleLoader__.load({
 .kanban-plugin-modal-title{font-size:14px;font-weight:600}
 .kanban-plugin-modal-number{font-size:12px;color:var(--dsw-alias-brand-primary);font-weight:600}
 .kanban-plugin-modal-actions{display:flex;justify-content:flex-end;gap:8px}
+.kanban-plugin-modal-desc{font-size:12px;color:var(--dsw-alias-label-secondary);word-break:break-word}
+.kanban-plugin-start-list{display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto}
+.kanban-plugin-start-item{width:100%;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 `;
 
     function useBoard(kanbanReady) {
@@ -238,7 +255,7 @@ window.__ModuleLoader__.load({
       return { data, error, refresh, setError };
     }
 
-    function Card({ todo, onMove, onRemove, onEdit, onDragStart, onDragEnd, t }) {
+    function Card({ todo, onMove, onRemove, onEdit, onPickStart, onDragStart, onDragEnd, t }) {
       const actions = [];
       if (todo.status === "todo") actions.push({ key: "start", label: t("card.start"), to: "in_progress" });
       if (todo.status === "in_progress") actions.push({ key: "done", label: t("card.done"), to: "done" });
@@ -285,6 +302,13 @@ window.__ModuleLoader__.load({
               action.label,
             ),
           ),
+          todo.status === "todo"
+            ? h(
+                "button",
+                { className: "kanban-plugin-chip", onClick: () => onPickStart(todo.id) },
+                t("card.startIn"),
+              )
+            : null,
           h(
             "button",
             { className: "kanban-plugin-chip", onClick: () => onEdit(todo.id) },
@@ -299,7 +323,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function Column({ status, title, todos, onMove, onRemove, onEdit, onDragStart, onDragEnd, dragOver, onDragOverStatus, onDrop, t }) {
+    function Column({ status, title, todos, onMove, onRemove, onEdit, onPickStart, onDragStart, onDragEnd, dragOver, onDragOverStatus, onDrop, t }) {
       return h(
         "div",
         {
@@ -325,7 +349,7 @@ window.__ModuleLoader__.load({
         todos.length === 0
           ? h("div", { className: "kanban-plugin-empty" }, t("board.empty"))
           : todos.map((todo) =>
-              h(Card, { key: todo.id, todo, onMove, onRemove, onEdit, onDragStart, onDragEnd, t }),
+              h(Card, { key: todo.id, todo, onMove, onRemove, onEdit, onPickStart, onDragStart, onDragEnd, t }),
             ),
       );
     }
@@ -505,6 +529,77 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function StartPickerModal({ todo, kanbanReady, useSessions, onStart, onClose, t }) {
+      const [liveIds, setLiveIds] = React.useState(null);
+      const byId = useSessions((state) => state.byId);
+
+      React.useEffect(() => {
+        let cancelled = false;
+        (async () => {
+          try {
+            const kanban = await kanbanReady;
+            const res = await kanban.listSessions();
+            if (!cancelled && res && res.ok) setLiveIds(res.value.sessions.map((s) => s.id));
+            else if (!cancelled) setLiveIds([]);
+          } catch {
+            if (!cancelled) setLiveIds([]);
+          }
+        })();
+        return () => {
+          cancelled = true;
+        };
+      }, [kanbanReady]);
+
+      const label = (id) => byId?.[id]?.title || id;
+
+      return h(
+        "div",
+        { className: "kanban-plugin-backdrop", onClick: () => onClose() },
+        h(
+          "div",
+          {
+            className: "kanban-plugin-modal",
+            role: "dialog",
+            "aria-modal": "true",
+            onClick: (e) => e.stopPropagation(),
+            onKeyDown: (e) => {
+              if (e.key === "Escape") onClose();
+            },
+          },
+          h(
+            "div",
+            { className: "kanban-plugin-modal-head" },
+            h("span", { className: "kanban-plugin-modal-title" }, t("start.title")),
+            h("span", { className: "kanban-plugin-modal-number" }, `#${todo.number}`),
+          ),
+          h("div", { className: "kanban-plugin-modal-desc" }, todo.title),
+          h(
+            "button",
+            { className: "kanban-plugin-btn kanban-plugin-btn-primary", onClick: () => onStart(undefined) },
+            t("start.newSession"),
+          ),
+          (liveIds ?? []).length > 0
+            ? h(
+                "div",
+                { className: "kanban-plugin-start-list" },
+                liveIds.map((id) =>
+                  h(
+                    "button",
+                    { key: id, className: "kanban-plugin-btn kanban-plugin-start-item", onClick: () => onStart(id) },
+                    label(id),
+                  ),
+                ),
+              )
+            : h("div", { className: "kanban-plugin-empty" }, t("start.noLiveSessions")),
+          h(
+            "div",
+            { className: "kanban-plugin-modal-actions" },
+            h("button", { className: "kanban-plugin-btn", onClick: () => onClose() }, t("start.cancel")),
+          ),
+        ),
+      );
+    }
+
     function KanbanPage({ kanbanReady, t, useSessions }) {
       const { data, error, refresh, setError } = useBoard(kanbanReady);
       const [draft, setDraft] = React.useState("");
@@ -512,16 +607,9 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [editingId, setEditingId] = React.useState(null);
       const [showSettings, setShowSettings] = React.useState(false);
+      const [startPickerId, setStartPickerId] = React.useState(null);
       const [dragId, setDragId] = React.useState(null);
       const [dragOver, setDragOver] = React.useState(null);
-      // The board is root-scoped, so read the main-view session from the host's
-      // session list. The Host wakes only this session, never every live root.
-      const activeSessionId = useSessions((state) => {
-        for (const sessionId of state.ids) {
-          if ((state.byId[sessionId]?.retainedBy?.mainView ?? 0) > 0) return sessionId;
-        }
-        return undefined;
-      });
 
       const todos = data?.todos ?? [];
       const activeWorkspace = data?.activeWorkspace ?? null;
@@ -529,6 +617,7 @@ window.__ModuleLoader__.load({
       const maxParallelTasks = data?.maxParallelTasks ?? 1;
 
       const editingTodo = editingId === null ? null : todos.find((x) => x.id === editingId) || null;
+      const pickerTodo = startPickerId === null ? null : todos.find((x) => x.id === startPickerId) || null;
 
       const run = async (action) => {
         try {
@@ -560,8 +649,8 @@ window.__ModuleLoader__.load({
         }
       };
 
-      const move = (id, status) =>
-        run((kanban) => kanban.move(id, status, status === "in_progress" ? activeSessionId : undefined));
+      const move = (id, status, sessionId) =>
+        run((kanban) => kanban.move(id, status, sessionId));
 
       const remove = (id) => run((kanban) => kanban.deleteTodo(id));
 
@@ -569,6 +658,14 @@ window.__ModuleLoader__.load({
         const ok = await run((kanban) => kanban.update(id, changes));
         if (ok) setEditingId(null);
         return ok;
+      };
+
+      const pickStart = (id) => setStartPickerId(id);
+
+      const startIn = (sessionId) => {
+        const id = startPickerId;
+        setStartPickerId(null);
+        if (id) move(id, "in_progress", sessionId);
       };
 
       const selectWorkspace = (id) => run((kanban) => kanban.selectWorkspace(id));
@@ -663,6 +760,7 @@ window.__ModuleLoader__.load({
               onMove: move,
               onRemove: remove,
               onEdit: openEdit,
+              onPickStart: pickStart,
               onDragStart,
               onDragEnd,
               dragOver,
@@ -674,6 +772,16 @@ window.__ModuleLoader__.load({
         ),
         editingTodo
           ? h(EditModal, { todo: editingTodo, onSave: saveEdit, onClose: closeEdit, t })
+          : null,
+        pickerTodo
+          ? h(StartPickerModal, {
+              todo: pickerTodo,
+              kanbanReady,
+              useSessions,
+              onStart: startIn,
+              onClose: () => setStartPickerId(null),
+              t,
+            })
           : null,
         showSettings
           ? h(SettingsModal, { value: maxParallelTasks, onSave: saveSettings, onClose: () => setShowSettings(false), t })

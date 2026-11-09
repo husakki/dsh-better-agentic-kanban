@@ -1,27 +1,30 @@
 # better-agentic-kanban (BAK)
 
 A DeepSeek Harness plugin that puts a shared Kanban board in the Web UI: you
-write todos, start one, and the agent session you are viewing picks it up and
-works through it. The board is the hand-off point between you and the agent.
+write todos, start one, and a fresh agent session — bound to the todo's
+workspace — picks it up and works through it. The board is the hand-off point
+between you and the agent.
 
 ## Status
 
 Early development (`0.3.x`). The board, task CRUD, numbering, descriptions,
 in-place editing, drag-and-drop, workspace selection, concurrency settings, and
-agent wake-up work. Auto mode, session spawning, timers, and run summaries are
-planned but not implemented yet.
+isolated session start work. Auto mode, timers, and run summaries are planned
+but not implemented yet.
 
 ## What works now
 
 - Four columns: **Backlog**, **In Progress**, **Done**, and **Failed**, with counts.
 - Tasks are numbered (`#1`, `#2`, …); a number is never reused after a delete,
   and counters are scoped to the active workspace.
-- A workspace selector (a local directory) filters the board to that workspace.
+- A workspace selector lists DeepSeek Harness workspaces by name and filters the
+  board to the selected one.
 - Add a task with a title and an optional markdown description; click a card's
   title (or **Edit**) to change them inline.
 - Drag cards between columns, or use the **Start** / **Done** / **Reopen** /
   **Delete** actions.
-- Click **Start** to hand a task to the agent session you are viewing.
+- Click **Start** to spawn a fresh session bound to the task's workspace; use
+  **Start in…** to run it in an existing live session instead.
 - A **Settings** menu sets how many tasks the agent may run in parallel
   (`max_parallel_tasks`, 1–10), persisted to plugin configuration.
 - Four agent tools: `kanban_list`, `kanban_add`, `kanban_move`, `kanban_remove`.
@@ -56,11 +59,12 @@ expecting the new Host row or tools.
 
 ## Use
 
-1. Select a workspace — a local directory — from the top bar, or enter a new
-   path. The board scopes its cards and numbering to that workspace.
+1. Select a DeepSeek Harness workspace by name from the top bar. The board
+   scopes its cards and numbering to that workspace.
 2. Add a task with a title and an optional description.
-3. Open the session you want to run the task, then click **Start** (or drag the
-   card into **In Progress**). Only that session is woken.
+3. Click **Start** (or drag the card into **In Progress**) to spawn a fresh
+   session bound to the task's workspace. Use **Start in…** to reuse a live
+   session instead.
 4. Watch the card move to **In Progress**. The agent reads the board, does the
    work, and marks the card **Done** when it finishes. If it cannot finish, it
    leaves the card in progress and reports the blocker.
@@ -83,8 +87,9 @@ npm run check
   JSON file.
 - The Web client talks to the Host through typed remotes; the descriptors in
   `client.js` must match the service methods in `index.js`.
-- A user **Start** resolves the main-view session from the host session list and
-  wakes only that root agent. Agent tool calls never wake another agent.
+- A user **Start** spawns a fresh isolated session whose working directory is the
+  task's workspace; **Start in…** targets an existing live session instead. Agent
+  tool calls never wake or spawn another agent.
 - DSH packages are pinned to the tested Harness release and bumped together.
 
 ## Troubleshooting
@@ -95,9 +100,9 @@ npm run check
 - **Install reports `failed to import` with an old version path:** the process
   cached the previous `node_modules/.pnpm` paths. Restart DSH; reinstalling the
   bundle in the same process will not help.
-- **Start does nothing:** the board wakes the session you are viewing; open a
-  session first, then click Start. If no root is live, the card reverts to Todo
-  and the board shows an error.
+- **Start fails:** if the session cannot be spawned, the card reverts to Todo
+  and the board shows an error. **Start in…** only lists live sessions; if the
+  chosen session is no longer live, the start reverts too.
 - **The board looks empty after reinstall:** tasks live in the `kanban` storage
   domain and survive package/version changes; confirm you are on the same DSH
   home.

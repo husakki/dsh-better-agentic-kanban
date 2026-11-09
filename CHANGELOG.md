@@ -6,6 +6,16 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Starting a task now spawns a fresh, isolated session bound to the task's
+  workspace (`cwd`) instead of waking the session being viewed, so todo work
+  stays out of your chat and each task runs in its own session.
+
+### Added
+
+- A "Start in…" action to run a task in an existing live session instead.
+
 ## [0.2.1] - 2026-11-09
 
 ### Added
