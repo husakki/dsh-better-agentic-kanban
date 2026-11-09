@@ -15,6 +15,7 @@ test("package manifest names the plugin and its bundle", () => {
   assert.equal(pkg.license, "MIT");
   assert.equal(pkg.dsh.bundle.patch, "./cordis.patch.yml");
   assert.equal(pkg.dsh.client.platform, "web");
+  assert.equal(pkg.engines.dsh, "0.2.2-rc.1");
   assert.ok(pkg.dsh.client.inject.includes("@deepseek-ai/dsh-client-ui-session"));
 });
 

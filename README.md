@@ -26,8 +26,8 @@ numbering, timers, and run summaries are planned but not implemented yet.
 
 ## Requirements
 
-- DeepSeek Harness `0.2.2-rc.1` (the `@deepseek-ai/dsh-*` packages are pinned to
-  that line).
+- DeepSeek Harness `0.2.2-rc.1` (declared in `engines.dsh`; the `@deepseek-ai/dsh-*`
+  packages are pinned to that line).
 - Node.js `>= 24.9.0`.
 - A Web profile with the plugin installed.
 

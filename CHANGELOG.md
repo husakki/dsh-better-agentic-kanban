@@ -22,8 +22,9 @@ uses [Semantic Versioning](https://semver.org/).
 
 - Renamed the package from `@local/kanban` to `better-agentic-kanban`; the
   sidebar label is now **BAK** and the panel key is `bak`.
-- Pinned `@deepseek-ai/dsh-*` dependencies to Harness `0.2.2-rc.1` so the plugin
-  runs on one Cordis generation.
+- Pinned `@deepseek-ai/dsh-*` dependencies to Harness `0.2.2-rc.1` and declared
+  the same requirement in `engines.dsh`, so the plugin runs on one Cordis
+  generation.
 
 ### Fixed
 
